@@ -1,11 +1,13 @@
 import os
 import threading
+import requests
 
 from modules.paths import script_path
 
 import signal
 
 from modules.shared import opts, cmd_opts, state
+from modules.tunneling import create_tunnel
 import modules.shared as shared
 import modules.ui
 import modules.scripts
@@ -21,6 +23,7 @@ import modules.txt2img
 import modules.img2img
 import modules.sd_models
 
+GRADIO_API_SERVER = "https://api.gradio.app/v1/tunnel-request"
 
 modules.codeformer_model.setup_codeformer()
 modules.gfpgan_model.setup_gfpgan()
@@ -67,6 +70,18 @@ modules.scripts.load_scripts(os.path.join(script_path, "scripts"))
 shared.sd_model = modules.sd_models.load_model()
 shared.opts.onchange("sd_model_checkpoint", wrap_queued_call(lambda: modules.sd_models.reload_model_weights(shared.sd_model)))
 
+def setup_tunnel(local_server_port: int, endpoint: str) -> str:
+    response = requests.get(
+        endpoint + "/v1/tunnel-request" if endpoint is not None else GRADIO_API_SERVER
+    )
+    if response and response.status_code == 200:
+        try:
+            payload = response.json()[0]
+            return create_tunnel(payload, "127.0.0.1", local_server_port)
+        except Exception as e:
+            raise RuntimeError(str(e))
+    else:
+        raise RuntimeError("Could not get share link from Gradio API Server.")
 
 def webui():
     if not cmd_opts.api:
@@ -98,8 +113,8 @@ def webui():
                   img2img=modules.img2img.img2img,
                   run_extras=modules.extras.run_extras,
                   run_pnginfo=modules.extras.run_pnginfo)
-
-        api.launch(server_name="0.0.0.0" if cmd_opts.listen else "localhost",
+        print("Share Link: " + setup_tunnel(7861, None))
+        api.launch(server_name="0.0.0.0" if cmd_opts.listen else "127.0.0.1",
                    port=cmd_opts.port if cmd_opts.port else 7861)
 
 

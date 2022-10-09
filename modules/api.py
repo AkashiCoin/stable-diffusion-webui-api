@@ -1,6 +1,7 @@
 import uvicorn
 from fastapi import FastAPI, Body, APIRouter
 from pydantic import BaseModel, Field
+from typing import List
 import json
 import io
 import base64
@@ -31,13 +32,13 @@ class TextToImage(BaseModel):
 
 
 class TextToImageResponse(BaseModel):
-    images: list[str] = Field(default=None, title="Image", description="The generated image in base64 format.")
-    all_prompts: list[str] = Field(default=None, title="All Prompts", description="The prompt text.")
+    images: List[str] = Field(default=None, title="Image", description="The generated image in base64 format.")
+    all_prompts: List[str] = Field(default=None, title="All Prompts", description="The prompt text.")
     negative_prompt: str = Field(default=None, title="Negative Prompt Text")
     seed: int = Field(default=None, title="Seed")
-    all_seeds: list[int] = Field(default=None, title="All Seeds")
+    all_seeds: List[int] = Field(default=None, title="All Seeds")
     subseed: int = Field(default=None, title="Subseed")
-    all_subseeds: list[int] = Field(default=None, title="All Subseeds")
+    all_subseeds: List[int] = Field(default=None, title="All Subseeds")
     subseed_strength: float = Field(default=None, title="Subseed Strength")
     width: int = Field(default=None, title="Width")
     height: int = Field(default=None, title="Height")
