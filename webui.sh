@@ -41,11 +41,13 @@ then
     venv_dir="venv"
 fi
 
-# install command for torch
-if [[ -z "${TORCH_COMMAND}" ]]
+if [[ -z "${LAUNCH_SCRIPT}" ]]
 then
-    export TORCH_COMMAND="pip install torch==1.12.1+cu113 --extra-index-url https://download.pytorch.org/whl/cu113"
+    LAUNCH_SCRIPT="launch.py"
 fi
+
+# Disable sentry logging
+export ERROR_REPORTING=FALSE
 
 # Do not reinstall existing pip packages on Debian/Ubuntu
 export PIP_IGNORE_INSTALLED=0
@@ -136,4 +138,4 @@ fi
 printf "\n%s\n" "${delimiter}"
 printf "Launching launch.py..."
 printf "\n%s\n" "${delimiter}"
-"${python_cmd}" launch.py
+"${python_cmd}" "${LAUNCH_SCRIPT}"

@@ -1,37 +1,42 @@
 import os
 import threading
-import requests
+import time
+import importlib
+import signal
+import threading
+
+from fastapi.middleware.gzip import GZipMiddleware
 
 from modules.paths import script_path
 
-import signal
+from modules import devices, sd_samplers
+import modules.codeformer_model as codeformer
+import modules.extras
+import modules.face_restoration
+import modules.gfpgan_model as gfpgan
+import modules.img2img
 
-from modules.shared import opts, cmd_opts, state
-from modules.tunneling import create_tunnel
-import modules.shared as shared
-import modules.ui
+import modules.lowvram
+import modules.paths
 import modules.scripts
 import modules.sd_hijack
-import modules.codeformer_model
-import modules.gfpgan_model
-import modules.face_restoration
-import modules.realesrgan_model as realesrgan
-import modules.esrgan_model as esrgan
-import modules.extras
-import modules.lowvram
-import modules.txt2img
-import modules.img2img
 import modules.sd_models
+import modules.shared as shared
+import modules.txt2img
 
-GRADIO_API_SERVER = "https://api.gradio.app/v1/tunnel-request"
+import modules.ui
+from modules import devices
+from modules import modelloader
+from modules.paths import script_path
+from modules.shared import cmd_opts
+from modules.tunneling import setup_tunnel
 
-modules.codeformer_model.setup_codeformer()
-modules.gfpgan_model.setup_gfpgan()
+modelloader.cleanup_models()
+modules.sd_models.setup_model()
+codeformer.setup_model(cmd_opts.codeformer_models_path)
+gfpgan.setup_model(cmd_opts.gfpgan_models_path)
 shared.face_restorers.append(modules.face_restoration.FaceRestoration())
-
-esrgan.load_models(cmd_opts.esrgan_models_path)
-realesrgan.setup_realesrgan()
-
+modelloader.load_upscalers()
 queue_lock = threading.Lock()
 
 
@@ -45,14 +50,20 @@ def wrap_queued_call(func):
     return f
 
 
-def wrap_gradio_gpu_call(func):
+def wrap_gradio_gpu_call(func, extra_outputs=None):
     def f(*args, **kwargs):
+        devices.torch_gc()
+
         shared.state.sampling_step = 0
         shared.state.job_count = -1
         shared.state.job_no = 0
+        shared.state.job_timestamp = shared.state.get_job_timestamp()
         shared.state.current_latent = None
         shared.state.current_image = None
         shared.state.current_image_sampling_step = 0
+        shared.state.skipped = False
+        shared.state.interrupted = False
+        shared.state.textinfo = None
 
         with queue_lock:
             res = func(*args, **kwargs)
@@ -60,9 +71,11 @@ def wrap_gradio_gpu_call(func):
         shared.state.job = ""
         shared.state.job_count = 0
 
+        devices.torch_gc()
+
         return res
 
-    return modules.ui.wrap_gradio_call(f)
+    return modules.ui.wrap_gradio_call(f, extra_outputs=extra_outputs)
 
 
 modules.scripts.load_scripts(os.path.join(script_path, "scripts"))
@@ -70,18 +83,9 @@ modules.scripts.load_scripts(os.path.join(script_path, "scripts"))
 shared.sd_model = modules.sd_models.load_model()
 shared.opts.onchange("sd_model_checkpoint", wrap_queued_call(lambda: modules.sd_models.reload_model_weights(shared.sd_model)))
 
-def setup_tunnel(local_server_port: int, endpoint: str) -> str:
-    response = requests.get(
-        endpoint + "/v1/tunnel-request" if endpoint is not None else GRADIO_API_SERVER
-    )
-    if response and response.status_code == 200:
-        try:
-            payload = response.json()[0]
-            return create_tunnel(payload, "127.0.0.1", local_server_port)
-        except Exception as e:
-            raise RuntimeError(str(e))
-    else:
-        raise RuntimeError("Could not get share link from Gradio API Server.")
+loaded_hypernetwork = modules.hypernetwork.load_hypernetwork(shared.opts.sd_hypernetwork)
+shared.opts.onchange("sd_hypernetwork", wrap_queued_call(lambda: modules.hypernetwork.load_hypernetwork(shared.opts.sd_hypernetwork)))
+
 
 def webui():
     if not cmd_opts.api:
@@ -92,21 +96,37 @@ def webui():
 
         signal.signal(signal.SIGINT, sigint_handler)
 
-        demo = modules.ui.create_ui(
-            txt2img=wrap_gradio_gpu_call(modules.txt2img.txt2img),
-            img2img=wrap_gradio_gpu_call(modules.img2img.img2img),
-            run_extras=wrap_gradio_gpu_call(modules.extras.run_extras),
-            run_pnginfo=modules.extras.run_pnginfo
-        )
+        while 1:
 
-        demo.launch(
-            share=cmd_opts.share,
-            server_name="0.0.0.0" if cmd_opts.listen else None,
-            server_port=cmd_opts.port,
-            debug=cmd_opts.gradio_debug,
-            auth=[tuple(cred.split(':')) for cred in cmd_opts.gradio_auth.strip('"').split(',')] if cmd_opts.gradio_auth else None,
-            inbrowser=cmd_opts.autolaunch,
-        )
+            demo = modules.ui.create_ui(wrap_gradio_gpu_call=wrap_gradio_gpu_call)
+            
+            app,local_url,share_url = demo.launch(
+                share=cmd_opts.share,
+                server_name="0.0.0.0" if cmd_opts.listen else None,
+                server_port=cmd_opts.port,
+                debug=cmd_opts.gradio_debug,
+                auth=[tuple(cred.split(':')) for cred in cmd_opts.gradio_auth.strip('"').split(',')] if cmd_opts.gradio_auth else None,
+                inbrowser=cmd_opts.autolaunch,
+                prevent_thread_lock=True
+            )
+            
+            app.add_middleware(GZipMiddleware,minimum_size=1000)
+
+            while 1:
+                time.sleep(0.5)
+                if getattr(demo, 'do_restart', False):
+                    time.sleep(0.5)
+                    demo.close()
+                    time.sleep(0.5)
+                    break
+
+            sd_samplers.set_samplers()
+
+            print('Reloading Custom Scripts')
+            modules.scripts.reload_scripts(os.path.join(script_path, "scripts"))
+            print('Reloading modules: modules.ui')
+            importlib.reload(modules.ui)
+            print('Restarting Gradio')
     else:
         from modules.api import Api
         api = Api(txt2img=modules.txt2img.txt2img,

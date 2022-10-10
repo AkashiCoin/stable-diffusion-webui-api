@@ -5,6 +5,7 @@ Inspired by: https://github.com/paramiko/paramiko/blob/master/demos/rforward.py
 
 import select
 import socket
+import requests
 import sys
 import threading
 import warnings
@@ -15,6 +16,9 @@ from cryptography.utils import CryptographyDeprecationWarning
 with warnings.catch_warnings():
     warnings.filterwarnings("ignore", category=CryptographyDeprecationWarning)
     import paramiko
+
+
+GRADIO_API_SERVER = "https://api.gradio.app/v1/tunnel-request"
 
 
 def handler(chan, host, port):
@@ -99,3 +103,18 @@ def create_tunnel(payload, local_server, local_server_port):
     thread.start()
 
     return payload["share_url"]
+
+
+
+def setup_tunnel(local_server_port: int, endpoint: str) -> str:
+    response = requests.get(
+        endpoint + "/v1/tunnel-request" if endpoint is not None else GRADIO_API_SERVER
+    )
+    if response and response.status_code == 200:
+        try:
+            payload = response.json()[0]
+            return create_tunnel(payload, "127.0.0.1", local_server_port)
+        except Exception as e:
+            raise RuntimeError(str(e))
+    else:
+        raise RuntimeError("Could not get share link from Gradio API Server.")

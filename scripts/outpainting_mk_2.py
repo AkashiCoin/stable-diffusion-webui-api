@@ -12,45 +12,7 @@ from modules.processing import Processed, process_images
 from modules.shared import opts, cmd_opts, state
 
 
-def expand(x, dir, amount, power=0.75):
-    is_left = dir == 3
-    is_right = dir == 1
-    is_up = dir == 0
-    is_down = dir == 2
-
-    if is_left or is_right:
-        noise = np.zeros((x.shape[0], amount, 3), dtype=float)
-        indexes = np.random.random((x.shape[0], amount)) ** power * (1 - np.arange(amount) / amount)
-        if is_right:
-            indexes = 1 - indexes
-        indexes = (indexes * (x.shape[1] - 1)).astype(int)
-
-        for row in range(x.shape[0]):
-            if is_left:
-                noise[row] = x[row][indexes[row]]
-            else:
-                noise[row] = np.flip(x[row][indexes[row]], axis=0)
-
-        x = np.concatenate([noise, x] if is_left else [x, noise], axis=1)
-        return x
-
-    if is_up or is_down:
-        noise = np.zeros((amount, x.shape[1], 3), dtype=float)
-        indexes = np.random.random((x.shape[1], amount)) ** power * (1 - np.arange(amount) / amount)
-        if is_down:
-            indexes = 1 - indexes
-        indexes = (indexes * x.shape[0] - 1).astype(int)
-
-        for row in range(x.shape[1]):
-            if is_up:
-                noise[:, row] = x[:, row][indexes[row]]
-            else:
-                noise[:, row] = np.flip(x[:, row][indexes[row]], axis=0)
-
-        x = np.concatenate([noise, x] if is_up else [x, noise], axis=0)
-        return x
-
-
+# this function is taken from https://github.com/parlance-zz/g-diffuser-bot
 def get_matched_noise(_np_src_image, np_mask_rgb, noise_q=1, color_variation=0.05):
     # helper fft routines that keep ortho normalization and auto-shift before and after fft
     def _fft2(data):
@@ -123,8 +85,11 @@ def get_matched_noise(_np_src_image, np_mask_rgb, noise_q=1, color_variation=0.0
     src_dist = np.absolute(src_fft)
     src_phase = src_fft / src_dist
 
+    # create a generator with a static seed to make outpainting deterministic / only follow global seed
+    rng = np.random.default_rng(0)
+
     noise_window = _get_gaussian_window(width, height, mode=1)  # start with simple gaussian noise
-    noise_rgb = np.random.random_sample((width, height, num_channels))
+    noise_rgb = rng.random((width, height, num_channels))
     noise_grey = (np.sum(noise_rgb, axis=2) / 3.)
     noise_rgb *= color_variation  # the colorfulness of the starting noise is blended to greyscale with a parameter
     for c in range(num_channels):
@@ -197,6 +162,7 @@ class Script(scripts.Script):
 
         if left > 0:
             left = left * (target_w - init_img.width) // (left + right)
+
         if right > 0:
             right = target_w - init_img.width - left
 
@@ -208,7 +174,7 @@ class Script(scripts.Script):
 
         init_image = p.init_images[0]
 
-        state.job_count = (1 if left > 0 else 0) + (1 if right > 0 else 0)+ (1 if up > 0 else 0)+ (1 if down > 0 else 0)
+        state.job_count = (1 if left > 0 else 0) + (1 if right > 0 else 0) + (1 if up > 0 else 0) + (1 if down > 0 else 0)
 
         def expand(init, expand_pixels, is_left=False, is_right=False, is_top=False, is_bottom=False):
             is_horiz = is_left or is_right
@@ -216,15 +182,20 @@ class Script(scripts.Script):
             pixels_horiz = expand_pixels if is_horiz else 0
             pixels_vert = expand_pixels if is_vert else 0
 
-            img = Image.new("RGB", (init.width + pixels_horiz, init.height + pixels_vert))
+            res_w = init.width + pixels_horiz
+            res_h = init.height + pixels_vert
+            process_res_w = math.ceil(res_w / 64) * 64
+            process_res_h = math.ceil(res_h / 64) * 64
+
+            img = Image.new("RGB", (process_res_w, process_res_h))
             img.paste(init, (pixels_horiz if is_left else 0, pixels_vert if is_top else 0))
-            mask = Image.new("RGB", (init.width + pixels_horiz, init.height + pixels_vert), "white")
+            mask = Image.new("RGB", (process_res_w, process_res_h), "white")
             draw = ImageDraw.Draw(mask)
             draw.rectangle((
                 expand_pixels + mask_blur if is_left else 0,
                 expand_pixels + mask_blur if is_top else 0,
-                mask.width - expand_pixels - mask_blur if is_right else mask.width,
-                mask.height - expand_pixels - mask_blur if is_bottom else mask.height,
+                mask.width - expand_pixels - mask_blur if is_right else res_w,
+                mask.height - expand_pixels - mask_blur if is_bottom else res_h,
             ), fill="black")
 
             np_image = (np.asarray(img) / 255.0).astype(np.float64)
@@ -255,8 +226,8 @@ class Script(scripts.Script):
             draw.rectangle((
                 expand_pixels + mask_blur * 2 if is_left else 0,
                 expand_pixels + mask_blur * 2 if is_top else 0,
-                mask.width - expand_pixels - mask_blur * 2 if is_right else mask.width,
-                mask.height - expand_pixels - mask_blur * 2 if is_bottom else mask.height,
+                mask.width - expand_pixels - mask_blur * 2 if is_right else res_w,
+                mask.height - expand_pixels - mask_blur * 2 if is_bottom else res_h,
             ), fill="black")
             p.latent_mask = latent_mask
 
@@ -268,6 +239,7 @@ class Script(scripts.Script):
                 initial_seed_and_info[1] = proc.info
 
             out.paste(proc_img, (0 if is_left else out.width - proc_img.width, 0 if is_top else out.height - proc_img.height))
+            out = out.crop((0, 0, res_w, res_h))
             return out
 
         img = init_image
